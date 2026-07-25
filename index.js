@@ -12,6 +12,7 @@ const https = require('https');
 // EXPRESS SERVER - Keep Render/Aternos alive
 // ============================================================
 const app = express();
+app.use(express.json()); // لدعم استقبال بيانات JSON من التلغرام
 const PORT = process.env.PORT || 5000;
 
 // Bot state tracking
@@ -23,6 +24,70 @@ let botState = {
   errors: [],
   wasThrottled: false
 };
+
+// ============================================================
+// TELEGRAM API ENDPOINTS (مسارات استقبال الأوامر من التلغرام)
+// ============================================================
+
+// 🟢 مسار التشغيل من التلغرام
+app.post('/start-bot', (req, res) => {
+  const host = req.body.host || config.server.ip;
+  const port = req.body.port || config.server.port || 25565;
+  const username = req.body.username || config['bot-account'].username;
+
+  // تحديث الإعدادات بالبيانات الممررة إن وجدت
+  config.server.ip = host;
+  config.server.port = port;
+  config['bot-account'].username = username;
+
+  if (bot && botState.connected) {
+    return res.status(200).json({
+      success: true,
+      message: `⚠️ البوت متصل بالفعل باسم (${config['bot-account'].username}) في سيرفر: ${config.server.ip}`
+    });
+  }
+
+  try {
+    createBot();
+    return res.status(200).json({
+      success: true,
+      message: `✅ تم إرسال أمر تشغيل البوت بنجاح!\n🤖 الاسم: ${username}\n🌐 السيرفر: ${host}:${port}`
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: `❌ فشل تشغيل البوت: ${err.message}`
+    });
+  }
+});
+
+// 🔴 مسار الإيقاف من التلغرام
+app.post('/stop-bot', (req, res) => {
+  if (bot) {
+    try {
+      clearAllIntervals();
+      clearBotTimeouts();
+      bot.removeAllListeners();
+      bot.quit();
+      bot = null;
+      botState.connected = false;
+      return res.status(200).json({
+        success: true,
+        message: "🛑 تم إيقاف البوت وخروجه من السيرفر بنجاح!"
+      });
+    } catch (e) {
+      return res.status(500).json({
+        success: false,
+        message: `❌ حدث خطأ أثناء إيقاف البوت: ${e.message}`
+      });
+    }
+  } else {
+    return res.status(200).json({
+      success: false,
+      message: "⚠️ لا يوجد بوت يعمل حالياً لإيقافه!"
+    });
+  }
+});
 
 // Health check endpoint for monitoring
 app.get('/', (req, res) => {
@@ -253,9 +318,10 @@ app.get('/', (req, res) => {
     </html>
   `);
 });
+
 app.get('/tutorial', (req, res) => {
   res.send(`
-  < html >
+  <html>
       <head>
         <title>${config.name} - Setup Guide</title>
         <style>
@@ -300,7 +366,7 @@ app.get('/tutorial', (req, res) => {
         </div>
         <p style="text-align: center; margin-top: 40px; color: #64748b;">AFK Bot Dashboard</p>
       </body>
-    </html >
+    </html>
   `);
 });
 
@@ -319,29 +385,27 @@ app.get('/ping', (req, res) => res.send('pong'));
 
 // FIX: handle port conflict gracefully - try next port if taken
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Server] HTTP server started on port ${server.address().port} `);
+  console.log(`[Server] HTTP server started on port ${server.address().port}`);
 });
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     const fallbackPort = PORT + 1;
-    console.log(`[Server] Port ${PORT} in use - trying port ${fallbackPort} `);
+    console.log(`[Server] Port ${PORT} in use - trying port ${fallbackPort}`);
     server.listen(fallbackPort, '0.0.0.0');
   } else {
-    console.log(`[Server] HTTP server error: ${err.message} `);
+    console.log(`[Server] HTTP server error: ${err.message}`);
   }
 });
 
-// FIX: only one definition of formatUptime
 function formatUptime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  return `${h}h ${m}m ${s} s`;
+  return `${h}h ${m}m ${s}s`;
 }
 
 // ============================================================
 // SELF-PING - Prevent Render from sleeping
-// FIX: only ping if RENDER_EXTERNAL_URL is set (skip useless localhost ping)
 // ============================================================
 const SELF_PING_INTERVAL = 10 * 60 * 1000;
 
@@ -376,9 +440,6 @@ setInterval(() => {
 // ============================================================
 // BOT CREATION WITH RECONNECTION LOGIC
 // ============================================================
-// ============================================================
-// RECONNECTION & TIMEOUT MANAGEMENT
-// ============================================================
 let bot = null;
 let activeIntervals = [];
 let reconnectTimeoutId = null;
@@ -396,9 +457,8 @@ function clearBotTimeouts() {
   }
 }
 
-// FIX: Discord rate limiting - track last send time
 let lastDiscordSend = 0;
-const DISCORD_RATE_LIMIT_MS = 5000; // min 5s between webhook calls
+const DISCORD_RATE_LIMIT_MS = 5000;
 
 function clearAllIntervals() {
   console.log(`[Cleanup] Clearing ${activeIntervals.length} intervals`);
@@ -420,7 +480,6 @@ function getReconnectDelay() {
     return throttleDelay;
   }
 
-  // FIX: read auto-reconnect-delay from settings as base delay
   const baseDelay = config.utils['auto-reconnect-delay'] || 3000;
   const maxDelay = config.utils['max-reconnect-delay'] || 30000;
   const delay = Math.min(baseDelay * Math.pow(2, botState.reconnectAttempts), maxDelay);
@@ -434,7 +493,6 @@ function createBot() {
     return;
   }
 
-  // Cleanup previous bot properly to avoid ghost bots
   if (bot) {
     clearAllIntervals();
     try {
@@ -450,8 +508,6 @@ function createBot() {
   console.log(`[Bot] Connecting to ${config.server.ip}:${config.server.port}`);
 
   try {
-    // FIX: use version:false to auto-detect server version so the bot can join any server.
-    // If the user explicitly sets a version in settings.json it is still respected.
     const botVersion = config.server.version && config.server.version.trim() !== '' ? config.server.version : false;
     bot = mineflayer.createBot({
       username: config['bot-account'].username,
@@ -466,7 +522,6 @@ function createBot() {
 
     bot.loadPlugin(pathfinder);
 
-    // FIX: connection timeout - end the old bot before reconnecting to avoid ghost bots
     clearBotTimeouts();
     connectionTimeoutId = setTimeout(() => {
       if (!botState.connected) {
@@ -478,9 +533,8 @@ function createBot() {
         bot = null;
         scheduleReconnect();
       }
-    }, 150000); // 150s - Aternos servers can take 90-120s to finish spawning a player
+    }, 150000);
 
-    // FIX: guard against spawn firing twice (can happen on some servers)
     let spawnHandled = false;
 
     bot.once('spawn', () => {
@@ -498,7 +552,6 @@ function createBot() {
         sendDiscordWebhook(`[+] **Connected** to \`${config.server.ip}\``, 0x4ade80);
       }
 
-      // FIX: use bot.version (auto-detected) instead of config value so minecraft-data always matches
       const mcData = require('minecraft-data')(bot.version);
       const defaultMove = new Movements(bot, mcData);
       defaultMove.allowFreeMotion = false;
@@ -508,7 +561,6 @@ function createBot() {
 
       initializeModules(bot, mcData, defaultMove);
 
-      // Attempt creative mode (only works if bot has OP and enabled in settings)
       setTimeout(() => {
         if (bot && botState.connected && config.server['try-creative']) {
           bot.chat('/gamemode creative');
@@ -526,10 +578,7 @@ function createBot() {
       });
     });
 
-    // FIX: 'kicked' fires before 'end'. Remove the scheduleReconnect from 'kicked'
-    // so that 'end' is the single source of reconnect truth, preventing double-trigger.
     bot.on('kicked', (reason) => {
-      // FIX: stringify reason if it's an object to make it readable in logs
       const kickReason = typeof reason === 'object' ? JSON.stringify(reason) : reason;
       console.log(`[Bot] Kicked: ${kickReason}`);
       botState.connected = false;
@@ -545,21 +594,18 @@ function createBot() {
       if (config.discord && config.discord.events && config.discord.events.disconnect) {
         sendDiscordWebhook(`[!] **Kicked**: ${kickReason}`, 0xff0000);
       }
-      // NOTE: do NOT call scheduleReconnect() here - 'end' will fire right after 'kicked' and handle it
     });
 
-    // FIX: 'end' is the single reconnect trigger
     bot.on('end', (reason) => {
       console.log(`[Bot] Disconnected: ${reason || 'Unknown reason'}`);
       botState.connected = false;
       clearAllIntervals();
-      spawnHandled = false; // reset for next connection
+      spawnHandled = false;
 
       if (config.discord && config.discord.events && config.discord.events.disconnect) {
         sendDiscordWebhook(`[-] **Disconnected**: ${reason || 'Unknown'}`, 0xf87171);
       }
 
-      // ALWAYS reconnect — bot must never leave the server
       scheduleReconnect();
     });
 
@@ -567,7 +613,6 @@ function createBot() {
       const msg = err.message || '';
       console.log(`[Bot] Error: ${msg}`);
       botState.errors.push({ type: 'error', message: msg, time: Date.now() });
-      // Don't reconnect on error - let 'end' event handle it
     });
 
   } catch (err) {
@@ -579,7 +624,6 @@ function createBot() {
 function scheduleReconnect() {
   clearBotTimeouts();
 
-  // FIX: don't stack reconnect if already waiting
   if (isReconnecting) {
     console.log('[Bot] Reconnect already scheduled, skipping duplicate.');
     return;
@@ -604,7 +648,6 @@ function scheduleReconnect() {
 function initializeModules(bot, mcData, defaultMove) {
   console.log('[Modules] Initializing all modules...');
 
-  // ---------- AUTO AUTH (REACTIVE) ----------
   if (config.utils['auto-auth'] && config.utils['auto-auth'].enabled) {
     const password = config.utils['auto-auth'].password;
     let authHandled = false;
@@ -631,7 +674,6 @@ function initializeModules(bot, mcData, defaultMove) {
       }
     });
 
-    // Failsafe: if no prompt after 10s, try login anyway
     setTimeout(() => {
       if (!authHandled && bot && botState.connected) {
         console.log('[Auth] No prompt detected after 10s, sending /login as failsafe');
@@ -641,7 +683,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }, 10000);
   }
 
-  // ---------- CHAT MESSAGES ----------
   if (config.utils['chat-messages'] && config.utils['chat-messages'].enabled) {
     const messages = config.utils['chat-messages'].messages;
     if (config.utils['chat-messages'].repeat) {
@@ -660,23 +701,18 @@ function initializeModules(bot, mcData, defaultMove) {
     }
   }
 
-  // ---------- MOVE TO POSITION ----------
-  // FIX: only use position goal if circle-walk is NOT enabled (they fight over pathfinder)
   if (config.position && config.position.enabled && !(config.movement && config.movement['circle-walk'] && config.movement['circle-walk'].enabled)) {
     bot.pathfinder.setMovements(defaultMove);
     bot.pathfinder.setGoal(new GoalBlock(config.position.x, config.position.y, config.position.z));
     console.log('[Position] Navigating to configured position...');
   }
 
-  // ---------- ANTI-AFK ----------
   if (config.utils['anti-afk'] && config.utils['anti-afk'].enabled) {
-    // Arm swinging
     addInterval(() => {
       if (!bot || !botState.connected) return;
       try { bot.swingArm(); } catch (e) { }
     }, 10000 + Math.floor(Math.random() * 50000));
 
-    // Hotbar cycling
     addInterval(() => {
       if (!bot || !botState.connected) return;
       try {
@@ -685,7 +721,6 @@ function initializeModules(bot, mcData, defaultMove) {
       } catch (e) { }
     }, 30000 + Math.floor(Math.random() * 90000));
 
-    // Teabagging
     addInterval(() => {
       if (!bot || !botState.connected || typeof bot.setControlState !== 'function') return;
       if (Math.random() > 0.9) {
@@ -705,7 +740,6 @@ function initializeModules(bot, mcData, defaultMove) {
       }
     }, 120000 + Math.floor(Math.random() * 180000));
 
-    // FIX: micro-walk only when circle-walk is NOT running, to avoid interrupting pathfinder
     if (!(config.movement && config.movement['circle-walk'] && config.movement['circle-walk'].enabled)) {
       addInterval(() => {
         if (!bot || !botState.connected || typeof bot.setControlState !== 'function') return;
@@ -730,15 +764,10 @@ function initializeModules(bot, mcData, defaultMove) {
     }
   }
 
-  // ---------- MOVEMENT MODULES ----------
-  // FIX: check top-level movement.enabled flag
   if (config.movement && config.movement.enabled !== false) {
-    // FIX: circle-walk and random-jump both jump - only run one jumping mechanism
-    // random-jump is skipped if anti-afk jump is handled elsewhere; we only use random-jump here
     if (config.movement['circle-walk'] && config.movement['circle-walk'].enabled) {
       startCircleWalk(bot, defaultMove);
     }
-    // FIX: only run random-jump if circle-walk is NOT running (circle-walk also keeps bot moving)
     if (config.movement['random-jump'] && config.movement['random-jump'].enabled && !(config.movement['circle-walk'] && config.movement['circle-walk'].enabled)) {
       startRandomJump(bot);
     }
@@ -747,8 +776,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }
   }
 
-  // ---------- CUSTOM MODULES ----------
-  // FIX: avoidMobs AND combatModule conflict - if combat is enabled, don't run avoidMobs at the same time
   if (config.modules.avoidMobs && !config.modules.combat) {
     avoidMobs(bot);
   }
@@ -765,9 +792,6 @@ function initializeModules(bot, mcData, defaultMove) {
   console.log('[Modules] All modules initialized!');
 }
 
-// ============================================================
-// MOVEMENT HELPERS
-// ============================================================
 function startCircleWalk(bot, defaultMove) {
   const radius = config.movement['circle-walk'].radius;
   let angle = 0;
@@ -820,12 +844,6 @@ function startLookAround(bot) {
   }, config.movement['look-around'].interval);
 }
 
-// ============================================================
-// CUSTOM MODULES
-// ============================================================
-
-// Avoid mobs/players
-// FIX: e.username only exists on players; use e.name for mobs - now handled properly
 function avoidMobs(bot) {
   const safeDistance = 5;
   addInterval(() => {
@@ -851,26 +869,19 @@ function avoidMobs(bot) {
   }, 2000);
 }
 
-// Combat module
-// FIX: attack cooldown for 1.9+ (600ms minimum between attacks)
-// FIX: lock onto a target for multiple ticks instead of randomly switching every tick
-// FIX: autoEat - use i.foodPoints directly (mineflayer item property) instead of broken mcData lookup
 function combatModule(bot, mcData) {
   let lastAttackTime = 0;
   let lockedTarget = null;
   let lockedTargetExpiry = 0;
 
-  // FIX: use physicsTick (not the deprecated physicTick)
   bot.on('physicsTick', () => {
     if (!bot || !botState.connected) return;
     if (!config.combat['attack-mobs']) return;
 
     const now = Date.now();
-    // FIX: 1.9+ attack cooldown - respect at least 600ms between swings
     if (now - lastAttackTime < 620) return;
 
     try {
-      // FIX: only pick a new target if current one is gone or lock expired
       if (lockedTarget && now < lockedTargetExpiry && bot.entities[lockedTarget.id] && lockedTarget.position) {
         const dist = bot.entity.position.distanceTo(lockedTarget.position);
         if (dist < 4) {
@@ -882,14 +893,13 @@ function combatModule(bot, mcData) {
         }
       }
 
-      // Pick a new target
       const mobs = Object.values(bot.entities).filter(e =>
         e.type === 'mob' && e.position &&
         bot.entity.position.distanceTo(e.position) < 4
       );
       if (mobs.length > 0) {
         lockedTarget = mobs[0];
-        lockedTargetExpiry = now + 3000; // stick to same mob for 3 seconds
+        lockedTargetExpiry = now + 3000;
         bot.attack(lockedTarget);
         lastAttackTime = now;
       }
@@ -898,7 +908,6 @@ function combatModule(bot, mcData) {
     }
   });
 
-  // FIX: autoEat - check foodPoints property on the item directly (works reliably)
   bot.on('health', () => {
     if (!config.combat['auto-eat']) return;
     try {
@@ -916,20 +925,16 @@ function combatModule(bot, mcData) {
   });
 }
 
-// Bed module
-// FIX: bot.isSleeping can be stale; use a local isTryingToSleep guard to prevent double-sleep errors
-// FIX: place-night was false in default settings - documentation note added
 function bedModule(bot, mcData) {
   let isTryingToSleep = false;
 
   addInterval(async () => {
     if (!bot || !botState.connected) return;
-    if (!config.beds['place-night']) return; // FIX: check flag (was always skipping before)
+    if (!config.beds['place-night']) return;
 
     try {
       const isNight = bot.time.timeOfDay >= 12500 && bot.time.timeOfDay <= 23500;
 
-      // FIX: use local guard instead of stale bot.isSleeping
       if (isNight && !isTryingToSleep) {
         const bedBlock = bot.findBlock({
           matching: block => block.name.includes('bed'),
@@ -942,7 +947,6 @@ function bedModule(bot, mcData) {
             await bot.sleep(bedBlock);
             console.log('[Bed] Sleeping...');
           } catch (e) {
-            // Can't sleep - maybe not night enough or monsters nearby
           } finally {
             isTryingToSleep = false;
           }
@@ -955,14 +959,11 @@ function bedModule(bot, mcData) {
   }, 10000);
 }
 
-// Chat module
-// FIX: wire up discord.events.chat flag
 function chatModule(bot) {
   bot.on('chat', (username, message) => {
     if (!bot || username === bot.username) return;
 
     try {
-      // FIX: send chat events to Discord if enabled
       if (config.discord && config.discord.enabled && config.discord.events && config.discord.events.chat) {
         sendDiscordWebhook(`💬 **${username}**: ${message}`, 0x7289da);
       }
@@ -983,9 +984,6 @@ function chatModule(bot) {
   });
 }
 
-// ============================================================
-// CONSOLE COMMANDS
-// ============================================================
 const readline = require('readline');
 const rl = readline.createInterface({
   input: process.stdin,
@@ -1011,15 +1009,9 @@ rl.on('line', (line) => {
   }
 });
 
-// ============================================================
-// DISCORD WEBHOOK INTEGRATION
-// FIX: use Buffer.byteLength for Content-Length (handles non-ASCII usernames correctly)
-// FIX: rate limiting to avoid spam when bot is flapping
-// ============================================================
 function sendDiscordWebhook(content, color = 0x0099ff) {
   if (!config.discord || !config.discord.enabled || !config.discord.webhookUrl || config.discord.webhookUrl.includes('YOUR_DISCORD')) return;
 
-  // FIX: Discord rate limiting - skip if sent too recently
   const now = Date.now();
   if (now - lastDiscordSend < DISCORD_RATE_LIMIT_MS) {
     console.log('[Discord] Rate limited - skipping webhook');
@@ -1047,14 +1039,11 @@ function sendDiscordWebhook(content, color = 0x0099ff) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      // FIX: use Buffer.byteLength instead of payload.length - handles non-ASCII (e.g. usernames with accents/emoji)
       'Content-Length': Buffer.byteLength(payload, 'utf8')
     }
   };
 
-  const req = protocol.request(options, (res) => {
-    // Silent success
-  });
+  const req = protocol.request(options, (res) => {});
 
   req.on('error', (e) => {
     console.log(`[Discord] Error sending webhook: ${e.message}`);
@@ -1064,16 +1053,11 @@ function sendDiscordWebhook(content, color = 0x0099ff) {
   req.end();
 }
 
-// ============================================================
-// CRASH RECOVERY - IMMORTAL MODE
-// FIX: guard against uncaughtException stacking reconnects when isReconnecting is already true
-// ============================================================
 process.on('uncaughtException', (err) => {
   const msg = err.message || 'Unknown';
   console.log(`[FATAL] Uncaught Exception: ${msg}`);
   botState.errors.push({ type: 'uncaught', message: msg, time: Date.now() });
 
-  // Cap errors array to prevent memory leak over long uptimes
   if (botState.errors.length > 100) {
     botState.errors = botState.errors.slice(-50);
   }
@@ -1086,15 +1070,12 @@ process.on('uncaughtException', (err) => {
     console.log('[FATAL] Known network/protocol error - recovering gracefully...');
   }
 
-  // ALWAYS recover — bot must never stay disconnected
   clearAllIntervals();
   botState.connected = false;
 
-  // FIX: reset isReconnecting if it was stuck, then schedule reconnect
   if (isReconnecting) {
     console.log('[FATAL] isReconnecting was stuck - resetting before crash recovery');
     isReconnecting = false;
-    // BUG FIX: was referencing non-existent 'reconnectTimeout' — correct name is 'reconnectTimeoutId'
     if (reconnectTimeoutId) {
       clearTimeout(reconnectTimeoutId);
       reconnectTimeoutId = null;
@@ -1119,15 +1100,10 @@ process.on('SIGINT', () => {
   console.log('[System] SIGINT received — ignoring, bot will stay alive.');
 });
 
-// ============================================================
-// START THE BOT
-// ============================================================
 console.log('='.repeat(50));
-console.log('  Minecraft AFK Bot v2.5 - Bug-Fixed Edition');
-console.log('='.repeat(50));
-console.log(`Server: ${config.server.ip}:${config.server.port}`);
-console.log(`Version: ${config.server.version}`);
-console.log(`Auto-Reconnect: ${config.utils['auto-reconnect'] ? 'Enabled' : 'Disabled'}`);
+console.log('  Minecraft AFK Bot v2.5 - Web API Enabled');
 console.log('='.repeat(50));
 
+// تشغيل البوت تلقائياً عند الإقلاع
 createBot();
+

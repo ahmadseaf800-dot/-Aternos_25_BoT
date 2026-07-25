@@ -6,8 +6,8 @@
     "type": "offline"
   },
   "server": {
-    "ip": "Idleb.aternos.me
-    "port": 56465
+    "ip": "Idleb.aternos.me",
+    "port": 56465,
     "version": "",
     "try-creative": false
   },
